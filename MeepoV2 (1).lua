@@ -166,6 +166,8 @@ script._autofarm_wave_marker_selected = script._autofarm_wave_marker_selected or
 script._autofarm_map_hero_cache = script._autofarm_map_hero_cache or { t = -9999, team = -1, entries = {} }
 script._autofarm_map_visible = script._autofarm_map_visible ~= false
 script._autofarm_map_last_toggle_time = script._autofarm_map_last_toggle_time or -9999
+script._autofarm_meepo_cache = script._autofarm_meepo_cache or { t = -9999, hero = nil, units = {} }
+script._autofarm_stagger_cache = script._autofarm_stagger_cache or { presence_t = -9999, selected_key = "", observed_by_id = {}, wave_t = -9999, wave_split = false, wave_markers = {}, wave_defense_targets = {} }
 local get_game_time
 local safe_call
 local get_entity_key
@@ -246,7 +248,7 @@ local AUTOFARM_WORLD_MIN = -8800
 local AUTOFARM_WORLD_MAX = 8800
 local AUTOFARM_MAX_CUSTOM_POINTS = 24
 local AUTOFARM_CAMP_CACHE_TTL = 1.5
-local AUTOFARM_LOGIC_TICK = 0.08
+local AUTOFARM_LOGIC_TICK = 0.15
 local AUTOFARM_MAP_HERO_CACHE_TTL = 0.35
 local AUTOFARM_ORDER_INTERVAL = 0.14
 local AUTOFARM_ASSIGN_LOCK_SEC = 2.25
@@ -292,6 +294,9 @@ script._autofarm_cfg = script._autofarm_cfg or {
     WAVE_MARKER_CACHE_TTL = 0.18,
     PRESENCE_CACHE_TTL = 0.16,
     UI_WAVE_MARKER_CACHE_TTL = 0.24,
+    PRESENCE_REFRESH_INTERVAL = 0.28,
+    WAVE_REFRESH_INTERVAL = 0.24,
+    PATH_BUDGET_PER_TICK = 28,
 }
 local AUTOFARM_MANA_MIN_RESERVE = 0
 local function autofarm_use_poof_flags()
@@ -1401,13 +1406,23 @@ local function build_tactical_line(hp_pct, mana_pct, poof_cd, net_cd, nearest_di
         fmt_dist(nearest_dist)
     )
 end
-local function collect_meepos()
+local AUTOFARM_MEEPO_CACHE_TTL = 0.10
+local function collect_meepos(force_refresh)
+    local now_time = tonumber((get_game_time and get_game_time()) or 0) or 0
+    local cache = script._autofarm_meepo_cache or { t = -9999, hero = nil, units = {} }
+    script._autofarm_meepo_cache = cache
+    local local_hero = Heroes.GetLocal()
+    if not force_refresh and cache.hero == local_hero and (now_time - (tonumber(cache.t or -9999) or -9999)) <= AUTOFARM_MEEPO_CACHE_TTL then
+        return cache.units or {}
+    end
     local result = {}
     local heroes = Heroes.GetAll()
     if not heroes then
+        cache.t = now_time
+        cache.hero = local_hero
+        cache.units = result
         return result
     end
-    local local_hero = Heroes.GetLocal()
     local local_team = tonumber(safe_call(Entity.GetTeamNum, local_hero) or -1) or -1
     for _, h in ipairs(heroes) do
         if is_meepo_instance(h) then
@@ -1417,6 +1432,9 @@ local function collect_meepos()
             end
         end
     end
+    cache.t = now_time
+    cache.hero = local_hero
+    cache.units = result
     return result
 end
 get_entity_key = function(entity)
@@ -9348,6 +9366,8 @@ function clear_autofarm_runtime_state()
     script._autofarm_wave_markers_cache = { t = -9999, hero = nil, markers = {}, towers = {}, team = -1 }
     script._autofarm_map_hero_cache = { t = -9999, hero = nil, team = -1, entries = {} }
     script._autofarm_presence_cache = { t = -9999, key = "", out = {} }
+    script._autofarm_stagger_cache = { presence_t = -9999, selected_key = "", observed_by_id = {}, wave_t = -9999, wave_split = false, wave_markers = {}, wave_defense_targets = {} }
+    script._autofarm_meepo_cache = { t = -9999, hero = nil, units = {} }
     script._autofarm_last_game_time = nil
     script._autofarm_next_tick = 0
     script._autofarm_metrics = {
@@ -10350,14 +10370,30 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
     -- build camp list with shared camp status for all meepos
     local selected = script.get_autofarm_selected_locations and script.get_autofarm_selected_locations() or {}
     script.autofarm_metric_set("selected_camps", #selected)
-    local observed = script.get_cached_autofarm_camp_presence(selected, now_time)
-    local observed_by_id = {}
-    for i = 1, #observed do
-        local entry = observed[i]
-        if entry and entry.camp and entry.camp.id then
-            observed_by_id[entry.camp.id] = entry
-        end
+    script._autofarm_stagger_cache = script._autofarm_stagger_cache or { presence_t = -9999, selected_key = "", observed_by_id = {}, wave_t = -9999, wave_split = false, wave_markers = {}, wave_defense_targets = {} }
+    local stagger = script._autofarm_stagger_cache
+    local selected_key_parts = {}
+    for i = 1, #selected do
+        local entry = selected[i]
+        selected_key_parts[#selected_key_parts + 1] = entry and entry.id and tostring(entry.id) or ""
     end
+    local selected_key = table.concat(selected_key_parts, ",")
+    local presence_refresh_interval = tonumber((script._autofarm_cfg and script._autofarm_cfg.PRESENCE_REFRESH_INTERVAL) or 0.28) or 0.28
+    local refresh_presence = stagger.selected_key ~= selected_key or (now_time - (tonumber(stagger.presence_t or -9999) or -9999)) >= presence_refresh_interval
+    if refresh_presence then
+        local observed = script.get_cached_autofarm_camp_presence(selected, now_time)
+        local observed_by_id = {}
+        for i = 1, #observed do
+            local entry = observed[i]
+            if entry and entry.camp and entry.camp.id then
+                observed_by_id[entry.camp.id] = entry
+            end
+        end
+        stagger.presence_t = now_time
+        stagger.selected_key = selected_key
+        stagger.observed_by_id = observed_by_id
+    end
+    local observed_by_id = stagger.observed_by_id or {}
     local camps = {}
     local camp_by_id = {}
     local next_spawn_time = get_next_neutral_spawn_time(now_time)
@@ -10508,27 +10544,48 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
     local wave_defense_targets = {}
     local wave_taken = {}
     if wave_split_enabled then
-        local markers = select(1, script.get_cached_autofarm_wave_markers(local_hero, now_time))
-        wave_markers = markers or {}
-        for i = 1, #wave_markers do
-            local marker = wave_markers[i]
-            if marker and marker.threatens_ally_tower == true and (tonumber(marker.count or 0) or 0) >= script._autofarm_cfg.WAVE_DEFENSE_MIN_CREEPS then
-                wave_defense_targets[#wave_defense_targets + 1] = marker
+        local wave_refresh_interval = tonumber((script._autofarm_cfg and script._autofarm_cfg.WAVE_REFRESH_INTERVAL) or 0.24) or 0.24
+        local refresh_wave = (stagger.wave_split ~= true) or ((now_time - (tonumber(stagger.wave_t or -9999) or -9999)) >= wave_refresh_interval)
+        if refresh_wave then
+            local markers = select(1, script.get_cached_autofarm_wave_markers(local_hero, now_time))
+            local defense = {}
+            local mk = markers or {}
+            for i = 1, #mk do
+                local marker = mk[i]
+                if marker and marker.threatens_ally_tower == true and (tonumber(marker.count or 0) or 0) >= script._autofarm_cfg.WAVE_DEFENSE_MIN_CREEPS then
+                    defense[#defense + 1] = marker
+                end
             end
+            stagger.wave_t = now_time
+            stagger.wave_split = true
+            stagger.wave_markers = mk
+            stagger.wave_defense_targets = defense
         end
+        wave_markers = stagger.wave_markers or {}
+        wave_defense_targets = stagger.wave_defense_targets or {}
     else
         script.autofarm_reset_wave_owner()
         wave_markers = {}
+        stagger.wave_split = false
+        stagger.wave_markers = {}
+        stagger.wave_defense_targets = {}
     end
 
     local path_cost_cache = {}
     local path_block_events_tick = 0
+    local path_budget_per_tick = tonumber((script._autofarm_cfg and script._autofarm_cfg.PATH_BUDGET_PER_TICK) or 28) or 28
+    local path_budget_used = 0
     function get_path_cost(from_pos, to_pos)
-        local cost, blocked, is_new = script.autofarm_estimate_path_cost(from_pos, to_pos, path_cost_cache)
-        if is_new and blocked > 0 then
-            path_block_events_tick = path_block_events_tick + 1
+        if path_budget_used < path_budget_per_tick then
+            path_budget_used = path_budget_used + 1
+            local cost, blocked, is_new = script.autofarm_estimate_path_cost(from_pos, to_pos, path_cost_cache)
+            if is_new and blocked > 0 then
+                path_block_events_tick = path_block_events_tick + 1
+            end
+            return tonumber(cost or 999999) or 999999
         end
-        return tonumber(cost or 999999) or 999999
+        script.autofarm_metric_inc("path_budget_fallback", 1)
+        return tonumber(vec_dist_2d(from_pos, to_pos) or 999999) or 999999
     end
     local camp_queue = script._autofarm_camp_queue_by_meepo or {}
     script._autofarm_camp_queue_by_meepo = camp_queue
