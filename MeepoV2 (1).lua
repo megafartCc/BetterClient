@@ -163,6 +163,7 @@ script._autofarm_master_last_enabled = script._autofarm_master_last_enabled or f
 script._autofarm_point_anim = script._autofarm_point_anim or {}
 script._autofarm_settings_side = script._autofarm_settings_side or "r"
 script._autofarm_wave_marker_selected = script._autofarm_wave_marker_selected or {}
+script._autofarm_map_hero_cache = script._autofarm_map_hero_cache or { t = -9999, team = -1, entries = {} }
 local get_game_time
 local safe_call
 local get_entity_key
@@ -244,6 +245,7 @@ local AUTOFARM_WORLD_MAX = 8800
 local AUTOFARM_MAX_CUSTOM_POINTS = 24
 local AUTOFARM_CAMP_CACHE_TTL = 1.5
 local AUTOFARM_LOGIC_TICK = 0.08
+local AUTOFARM_MAP_HERO_CACHE_TTL = 0.35
 local AUTOFARM_ORDER_INTERVAL = 0.14
 local AUTOFARM_ASSIGN_LOCK_SEC = 2.25
 local AUTOFARM_CAMP_DETECT_RADIUS = 760
@@ -9262,6 +9264,53 @@ function script.get_cached_autofarm_wave_markers(local_hero, now_time, ttl_overr
     script._autofarm_wave_markers_cache = cache
     return cache.markers, cache.towers, cache.team
 end
+
+function script.get_cached_autofarm_map_heroes(local_hero, now_time, ttl_override)
+    local t = tonumber(now_time or get_game_time() or 0) or 0
+    local ttl = tonumber(ttl_override or AUTOFARM_MAP_HERO_CACHE_TTL or 0.3) or 0.3
+    if ttl < 0.05 then
+        ttl = 0.05
+    end
+    script._autofarm_map_hero_cache = script._autofarm_map_hero_cache or { t = -9999, team = -1, entries = {} }
+    local cache = script._autofarm_map_hero_cache
+    local cache_time = tonumber(cache.t or -9999) or -9999
+    local local_team = tonumber(cache.team or -1) or -1
+    if cache.hero == local_hero and (t - cache_time) <= ttl then
+        return cache.entries or {}, local_team
+    end
+
+    local heroes = (Heroes and Heroes.GetAll and safe_call(Heroes.GetAll)) or {}
+    local entries = {}
+    local_team = tonumber(safe_call(Entity.GetTeamNum, local_hero) or -1) or -1
+    for i = 1, #heroes do
+        local hero = heroes[i]
+        if hero and Entity.IsAlive(hero) and not is_meepo_instance(hero) and safe_call(NPC.IsIllusion, hero) ~= true then
+            local pos = safe_call(Entity.GetAbsOrigin, hero)
+            local nx, ny = script.autofarm_world_to_norm(pos)
+            if nx and ny then
+                local team = tonumber(safe_call(Entity.GetTeamNum, hero) or -1) or -1
+                local is_ally = (local_team < 0) or (team == local_team)
+                local unit_name = safe_call(NPC.GetUnitName, hero)
+                local icon_path = unit_name and ("panorama/images/heroes/icons/" .. tostring(unit_name) .. "_png.vtex_c") or nil
+                local hero_icon = icon_path and autofarm_get_image_handle(icon_path) or nil
+                entries[#entries + 1] = {
+                    nx = nx,
+                    ny = ny,
+                    tint = is_ally and Color(115, 220, 255, 245) or Color(255, 118, 118, 245),
+                    icon = hero_icon,
+                }
+            end
+        end
+    end
+
+    cache.t = t
+    cache.hero = local_hero
+    cache.team = local_team
+    cache.entries = entries
+    script._autofarm_map_hero_cache = cache
+    return entries, local_team
+end
+
 function clear_autofarm_runtime_state()
     script._autofarm_assignment_by_meepo = {}
     script._autofarm_assignment_hold_until_by_meepo = {}
@@ -9286,6 +9335,7 @@ function clear_autofarm_runtime_state()
     script._autofarm_vision_empty_since = {}
     script._autofarm_empty_since = {}
     script._autofarm_wave_markers_cache = { t = -9999, hero = nil, markers = {}, towers = {}, team = -1 }
+    script._autofarm_map_hero_cache = { t = -9999, hero = nil, team = -1, entries = {} }
     script._autofarm_presence_cache = { t = -9999, key = "", out = {} }
     script._autofarm_last_game_time = nil
     script._autofarm_next_tick = 0
@@ -11927,30 +11977,18 @@ function script.draw_autofarm_map_panel(local_hero, meepos, now)
     end
     -- ally/enemy hero icons on map (excluding meepo units, already drawn above)
     do
-        local heroes = (Heroes and Heroes.GetAll and safe_call(Heroes.GetAll)) or {}
-        if local_team == nil then
-            local_team = tonumber(safe_call(Entity.GetTeamNum, local_hero) or -1) or -1
-        end
+        local hero_entries
+        hero_entries, local_team = script.get_cached_autofarm_map_heroes(local_hero, now)
         local hero_icon_size = math.max(9, math.floor(12 * scale))
         local hero_icon_half = hero_icon_size * 0.5
-        for i = 1, #heroes do
-            local hero = heroes[i]
-            if hero and Entity.IsAlive(hero) and not is_meepo_instance(hero) and safe_call(NPC.IsIllusion, hero) ~= true then
-                local pos = safe_call(Entity.GetAbsOrigin, hero)
-                local nx, ny = script.autofarm_world_to_norm(pos)
-                if nx and ny then
-                    local sx, sy = autofarm_map_to_screen(nx, ny, map_x, map_y, map_size_i)
-                    local team = tonumber(safe_call(Entity.GetTeamNum, hero) or -1) or -1
-                    local is_ally = (local_team < 0) or (team == local_team)
-                    local tint = is_ally and Color(115, 220, 255, 245) or Color(255, 118, 118, 245)
-                    local unit_name = safe_call(NPC.GetUnitName, hero)
-                    local icon_path = unit_name and ("panorama/images/heroes/icons/" .. tostring(unit_name) .. "_png.vtex_c") or nil
-                    local hero_icon = icon_path and autofarm_get_image_handle(icon_path) or nil
-                    if hero_icon and Render.Image then
-                        Render.Image(hero_icon, Vec2(sx - hero_icon_half, sy - hero_icon_half), Vec2(hero_icon_size, hero_icon_size), tint, 2)
-                    elseif Render.Circle then
-                        Render.Circle(Vec2(sx, sy), math.max(3, hero_icon_half - 2), tint, 2.2)
-                    end
+        for i = 1, #hero_entries do
+            local entry = hero_entries[i]
+            if entry and entry.nx and entry.ny then
+                local sx, sy = autofarm_map_to_screen(entry.nx, entry.ny, map_x, map_y, map_size_i)
+                if entry.icon and Render.Image then
+                    Render.Image(entry.icon, Vec2(sx - hero_icon_half, sy - hero_icon_half), Vec2(hero_icon_size, hero_icon_size), entry.tint or Color(255, 255, 255, 245), 2)
+                elseif Render.Circle then
+                    Render.Circle(Vec2(sx, sy), math.max(3, hero_icon_half - 2), entry.tint or Color(255, 255, 255, 245), 2.2)
                 end
             end
         end
