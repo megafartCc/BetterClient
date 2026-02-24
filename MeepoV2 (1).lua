@@ -10523,7 +10523,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
 
     local path_cost_cache = {}
     local path_block_events_tick = 0
-    local function get_path_cost(from_pos, to_pos)
+    function get_path_cost(from_pos, to_pos)
         local cost, blocked, is_new = script.autofarm_estimate_path_cost(from_pos, to_pos, path_cost_cache)
         if is_new and blocked > 0 then
             path_block_events_tick = path_block_events_tick + 1
@@ -10532,7 +10532,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
     end
     local camp_queue = script._autofarm_camp_queue_by_meepo or {}
     script._autofarm_camp_queue_by_meepo = camp_queue
-    local function get_queue_entry(meepo_key)
+    function get_queue_entry(meepo_key)
         if not meepo_key then
             return nil
         end
@@ -10549,7 +10549,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return q
     end
-    local function queue_clear_if_matches(meepo_key, camp_id)
+    function queue_clear_if_matches(meepo_key, camp_id)
         if not meepo_key or not camp_id then
             return
         end
@@ -10566,7 +10566,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
             q.updated_at = now_time
         end
     end
-    local function queue_primary_candidate(meepo_key)
+    function queue_primary_candidate(meepo_key)
         local q = get_queue_entry(meepo_key)
         local camp_id = q and q.primary_id or nil
         local camp = camp_id and camp_by_id[camp_id] or nil
@@ -10584,7 +10584,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return camp
     end
-    local function set_queue_plan(meepo_key, primary_id, secondary_id)
+    function set_queue_plan(meepo_key, primary_id, secondary_id)
         if not meepo_key then
             return
         end
@@ -10698,7 +10698,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         return (tonumber(a and a.key or 0) or 0) < (tonumber(b and b.key or 0) or 0)
     end)
 
-    local function choose_camp(meepo_pos, meepo_key, opts)
+    function choose_camp(meepo_pos, meepo_key, opts)
         opts = opts or {}
         local exclude_ids = opts.exclude_ids or nil
         local explicit_origin = opts.origin or nil
@@ -10866,7 +10866,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return fallback
     end
-    local function choose_wait_camp(meepo_pos, meepo_key, opts)
+    function choose_wait_camp(meepo_pos, meepo_key, opts)
         opts = opts or {}
         local exclude_ids = opts.exclude_ids or nil
         local respawn_fuzz = tonumber(script._autofarm_cfg.RESPAWN_PLAN_FUZZ or 1.35) or 1.35
@@ -10899,7 +10899,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return best
     end
-    local function handle_autostack_for_camp(meepo, key, meepo_pos, assigned, creeps)
+    function handle_autostack_for_camp(meepo, key, meepo_pos, assigned, creeps)
         if auto_stack_enabled ~= true then
             return false, false
         end
@@ -10976,7 +10976,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         return true, issued_stack
     end
 
-    local function try_autofarm_poof_move(meepo, meepo_key, meepo_pos, assigned)
+    function try_autofarm_poof_move(meepo, meepo_key, meepo_pos, assigned)
         if use_poof_move ~= true then
             return false
         end
@@ -11044,7 +11044,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return false
     end
-    local function get_alive_wave_creeps(creeps)
+    function get_alive_wave_creeps(creeps)
         local out = {}
         if not creeps then
             return out
@@ -11057,7 +11057,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return out
     end
-    local function choose_wave_target_for_meepo(meepo_pos, meepo_key)
+    function choose_wave_target_for_meepo(meepo_pos, meepo_key)
         if not script.autofarm_can_assign_wave_to(meepo_key, now_time) then
             return nil, nil
         end
@@ -11088,7 +11088,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return best, best_creeps
     end
-    local function handle_wave_defense_for_meepo(meepo, meepo_key, meepo_pos, wave_target, alive_creeps)
+    function handle_wave_defense_for_meepo(meepo, meepo_key, meepo_pos, wave_target, alive_creeps)
         if not meepo or not meepo_key or not meepo_pos or not wave_target or not wave_target.center then
             return false, false
         end
