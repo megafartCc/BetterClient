@@ -163,6 +163,11 @@ script._autofarm_master_last_enabled = script._autofarm_master_last_enabled or f
 script._autofarm_point_anim = script._autofarm_point_anim or {}
 script._autofarm_settings_side = script._autofarm_settings_side or "r"
 script._autofarm_wave_marker_selected = script._autofarm_wave_marker_selected or {}
+script._autofarm_map_hero_cache = script._autofarm_map_hero_cache or { t = -9999, team = -1, entries = {} }
+script._autofarm_map_visible = script._autofarm_map_visible ~= false
+script._autofarm_map_last_toggle_time = script._autofarm_map_last_toggle_time or -9999
+script._autofarm_meepo_cache = script._autofarm_meepo_cache or { t = -9999, hero = nil, units = {} }
+script._autofarm_stagger_cache = script._autofarm_stagger_cache or { presence_t = -9999, selected_key = "", observed_by_id = {}, wave_t = -9999, wave_split = false, wave_markers = {}, wave_defense_targets = {} }
 local get_game_time
 local safe_call
 local get_entity_key
@@ -243,7 +248,8 @@ local AUTOFARM_WORLD_MIN = -8800
 local AUTOFARM_WORLD_MAX = 8800
 local AUTOFARM_MAX_CUSTOM_POINTS = 24
 local AUTOFARM_CAMP_CACHE_TTL = 1.5
-local AUTOFARM_LOGIC_TICK = 0.08
+local AUTOFARM_LOGIC_TICK = 0.15
+local AUTOFARM_MAP_HERO_CACHE_TTL = 0.35
 local AUTOFARM_ORDER_INTERVAL = 0.14
 local AUTOFARM_ASSIGN_LOCK_SEC = 2.25
 local AUTOFARM_CAMP_DETECT_RADIUS = 760
@@ -288,6 +294,9 @@ script._autofarm_cfg = script._autofarm_cfg or {
     WAVE_MARKER_CACHE_TTL = 0.18,
     PRESENCE_CACHE_TTL = 0.16,
     UI_WAVE_MARKER_CACHE_TTL = 0.24,
+    PRESENCE_REFRESH_INTERVAL = 0.28,
+    WAVE_REFRESH_INTERVAL = 0.24,
+    PATH_BUDGET_PER_TICK = 28,
 }
 local AUTOFARM_MANA_MIN_RESERVE = 0
 local function autofarm_use_poof_flags()
@@ -835,7 +844,8 @@ if has_combo_group and has_display_group and has_abilities_group then
         ui.autofarm_enable = autofarm_group:Switch("\u{0412}\u{043a}\u{043b}\u{044e}\u{0447}\u{0438}\u{0442}\u{044c} \u{0410}\u{0432}\u{0442}\u{043e}\u{0424}\u{0430}\u{0440}\u{043c}", false)
         ui.autofarm_toggle_key = create_bind_safe(autofarm_group, "\u{041a}\u{043b}\u{0430}\u{0432}\u{0438}\u{0448}\u{0430} \u{0410}\u{0432}\u{0442}\u{043e}\u{0424}\u{0430}\u{0440}\u{043c}")
             or { IsPressed = function() return false end, IsDown = function() return false end }
-        ui.autofarm_show_map = autofarm_group:Switch("Floating AutoFarm Map", true)
+        ui.autofarm_map_toggle_key = create_bind_safe(autofarm_group, "AutoFarm Map: Open/Close")
+            or { IsPressed = function() return false end, IsDown = function() return false end }
         ui.autofarm_map_x = { Get = function() return 28 end }
         ui.autofarm_map_y = { Get = function() return 820 end }
         ui.autofarm_map_scale = autofarm_group:Slider("Minimap Scale (%)", 60, 220, 100, "%d%%")
@@ -897,7 +907,7 @@ if has_combo_group and has_display_group and has_abilities_group then
     else
         ui.autofarm_enable = { Get = function() return false end }
         ui.autofarm_toggle_key = { IsPressed = function() return false end, IsDown = function() return false end }
-        ui.autofarm_show_map = { Get = function() return true end }
+        ui.autofarm_map_toggle_key = { IsPressed = function() return false end, IsDown = function() return false end }
         ui.autofarm_map_x = { Get = function() return 28 end }
         ui.autofarm_map_y = { Get = function() return 820 end }
         ui.autofarm_map_scale = { Get = function() return 100 end }
@@ -1040,7 +1050,7 @@ else
     ui.auto_safe_enemy_radius = { Get = function() return 900 end }
     ui.autofarm_enable = { Get = function() return false end }
     ui.autofarm_toggle_key = { IsPressed = function() return false end, IsDown = function() return false end }
-    ui.autofarm_show_map = { Get = function() return true end }
+    ui.autofarm_map_toggle_key = { IsPressed = function() return false end, IsDown = function() return false end }
     ui.autofarm_map_x = { Get = function() return 28 end }
     ui.autofarm_map_y = { Get = function() return 820 end }
     ui.autofarm_map_scale = { Get = function() return 100 end }
@@ -1396,13 +1406,23 @@ local function build_tactical_line(hp_pct, mana_pct, poof_cd, net_cd, nearest_di
         fmt_dist(nearest_dist)
     )
 end
-local function collect_meepos()
+local AUTOFARM_MEEPO_CACHE_TTL = 0.10
+local function collect_meepos(force_refresh)
+    local now_time = tonumber((get_game_time and get_game_time()) or 0) or 0
+    local cache = script._autofarm_meepo_cache or { t = -9999, hero = nil, units = {} }
+    script._autofarm_meepo_cache = cache
+    local local_hero = Heroes.GetLocal()
+    if not force_refresh and cache.hero == local_hero and (now_time - (tonumber(cache.t or -9999) or -9999)) <= AUTOFARM_MEEPO_CACHE_TTL then
+        return cache.units or {}
+    end
     local result = {}
     local heroes = Heroes.GetAll()
     if not heroes then
+        cache.t = now_time
+        cache.hero = local_hero
+        cache.units = result
         return result
     end
-    local local_hero = Heroes.GetLocal()
     local local_team = tonumber(safe_call(Entity.GetTeamNum, local_hero) or -1) or -1
     for _, h in ipairs(heroes) do
         if is_meepo_instance(h) then
@@ -1412,6 +1432,9 @@ local function collect_meepos()
             end
         end
     end
+    cache.t = now_time
+    cache.hero = local_hero
+    cache.units = result
     return result
 end
 get_entity_key = function(entity)
@@ -7210,6 +7233,10 @@ function script.run_combo_logic(local_hero, meepos, now)
         return
     end
     if combo_phase == script.COMBO_PHASE_HEX and hex_remaining > C.COMBO_HEX_TO_CONTROL_CHAIN_WINDOW then
+        if try_combo_poof_burst_hex_fallback(net_units, combo_focus_target, now) then
+            script.set_combo_debug_state(script.COMBO_PHASE_POOF_ATTACK, "poof during hex", next_disable_text)
+            return
+        end
         script.set_combo_debug_state(combo_phase, "wait hex chain window", next_disable_text)
         if can_any_meepo_attack_target_now(net_units, combo_focus_target) then
             issue_combo_attack_order(local_player, net_units, combo_focus_target, now)
@@ -7217,6 +7244,10 @@ function script.run_combo_logic(local_hero, meepos, now)
         return
     end
     if hex_remaining > 0 and hex_remaining <= C.COMBO_HEX_TO_CONTROL_CHAIN_WINDOW then
+        if try_combo_poof_burst_hex_fallback(net_units, combo_focus_target, now) then
+            script.set_combo_debug_state(script.COMBO_PHASE_POOF_ATTACK, "poof during hex", next_disable_text)
+            return
+        end
         local main_net_ready = is_meepo_net_ready_for_combo(main_preferred, now)
         local any_net_ready = has_any_meepo_net_ready_for_combo(net_units, now)
         if net_enabled then
@@ -9262,6 +9293,53 @@ function script.get_cached_autofarm_wave_markers(local_hero, now_time, ttl_overr
     script._autofarm_wave_markers_cache = cache
     return cache.markers, cache.towers, cache.team
 end
+
+function script.get_cached_autofarm_map_heroes(local_hero, now_time, ttl_override)
+    local t = tonumber(now_time or get_game_time() or 0) or 0
+    local ttl = tonumber(ttl_override or AUTOFARM_MAP_HERO_CACHE_TTL or 0.3) or 0.3
+    if ttl < 0.05 then
+        ttl = 0.05
+    end
+    script._autofarm_map_hero_cache = script._autofarm_map_hero_cache or { t = -9999, team = -1, entries = {} }
+    local cache = script._autofarm_map_hero_cache
+    local cache_time = tonumber(cache.t or -9999) or -9999
+    local local_team = tonumber(cache.team or -1) or -1
+    if cache.hero == local_hero and (t - cache_time) <= ttl then
+        return cache.entries or {}, local_team
+    end
+
+    local heroes = (Heroes and Heroes.GetAll and safe_call(Heroes.GetAll)) or {}
+    local entries = {}
+    local_team = tonumber(safe_call(Entity.GetTeamNum, local_hero) or -1) or -1
+    for i = 1, #heroes do
+        local hero = heroes[i]
+        if hero and Entity.IsAlive(hero) and not is_meepo_instance(hero) and safe_call(NPC.IsIllusion, hero) ~= true then
+            local pos = safe_call(Entity.GetAbsOrigin, hero)
+            local nx, ny = script.autofarm_world_to_norm(pos)
+            if nx and ny then
+                local team = tonumber(safe_call(Entity.GetTeamNum, hero) or -1) or -1
+                local is_ally = (local_team < 0) or (team == local_team)
+                local unit_name = safe_call(NPC.GetUnitName, hero)
+                local icon_path = unit_name and ("panorama/images/heroes/icons/" .. tostring(unit_name) .. "_png.vtex_c") or nil
+                local hero_icon = icon_path and autofarm_get_image_handle(icon_path) or nil
+                entries[#entries + 1] = {
+                    nx = nx,
+                    ny = ny,
+                    tint = is_ally and Color(115, 220, 255, 245) or Color(255, 118, 118, 245),
+                    icon = hero_icon,
+                }
+            end
+        end
+    end
+
+    cache.t = t
+    cache.hero = local_hero
+    cache.team = local_team
+    cache.entries = entries
+    script._autofarm_map_hero_cache = cache
+    return entries, local_team
+end
+
 function clear_autofarm_runtime_state()
     script._autofarm_assignment_by_meepo = {}
     script._autofarm_assignment_hold_until_by_meepo = {}
@@ -9286,7 +9364,10 @@ function clear_autofarm_runtime_state()
     script._autofarm_vision_empty_since = {}
     script._autofarm_empty_since = {}
     script._autofarm_wave_markers_cache = { t = -9999, hero = nil, markers = {}, towers = {}, team = -1 }
+    script._autofarm_map_hero_cache = { t = -9999, hero = nil, team = -1, entries = {} }
     script._autofarm_presence_cache = { t = -9999, key = "", out = {} }
+    script._autofarm_stagger_cache = { presence_t = -9999, selected_key = "", observed_by_id = {}, wave_t = -9999, wave_split = false, wave_markers = {}, wave_defense_targets = {} }
+    script._autofarm_meepo_cache = { t = -9999, hero = nil, units = {} }
     script._autofarm_last_game_time = nil
     script._autofarm_next_tick = 0
     script._autofarm_metrics = {
@@ -9863,6 +9944,26 @@ function script.get_cached_autofarm_camp_presence(selected, now_time)
     script._autofarm_presence_cache = cache
     return cache.out
 end
+function script.update_autofarm_map_toggle(now)
+    local now_time = tonumber(now or get_game_time() or 0) or 0
+    local toggle_pressed = false
+    if script.is_bind_just_pressed then
+        toggle_pressed = script.is_bind_just_pressed(ui.autofarm_map_toggle_key, "autofarm_map_toggle") == true
+    elseif script.is_bind_pressed then
+        toggle_pressed = script.is_bind_pressed(ui.autofarm_map_toggle_key) == true
+    end
+    if not toggle_pressed then
+        return false
+    end
+    local last_toggle = tonumber(script._autofarm_map_last_toggle_time or -9999) or -9999
+    if (now_time - last_toggle) < 0.10 then
+        return false
+    end
+    script._autofarm_map_last_toggle_time = now_time
+    script._autofarm_map_visible = not (script._autofarm_map_visible == true)
+    return true
+end
+
 function script.update_autofarm_runtime_toggle(now)
     local master_enabled = ui.autofarm_enable and ui.autofarm_enable.Get and ui.autofarm_enable:Get() == true
     local now_time = tonumber(now or get_game_time() or 0) or 0
@@ -10269,14 +10370,30 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
     -- build camp list with shared camp status for all meepos
     local selected = script.get_autofarm_selected_locations and script.get_autofarm_selected_locations() or {}
     script.autofarm_metric_set("selected_camps", #selected)
-    local observed = script.get_cached_autofarm_camp_presence(selected, now_time)
-    local observed_by_id = {}
-    for i = 1, #observed do
-        local entry = observed[i]
-        if entry and entry.camp and entry.camp.id then
-            observed_by_id[entry.camp.id] = entry
-        end
+    script._autofarm_stagger_cache = script._autofarm_stagger_cache or { presence_t = -9999, selected_key = "", observed_by_id = {}, wave_t = -9999, wave_split = false, wave_markers = {}, wave_defense_targets = {} }
+    local stagger = script._autofarm_stagger_cache
+    local selected_key_parts = {}
+    for i = 1, #selected do
+        local entry = selected[i]
+        selected_key_parts[#selected_key_parts + 1] = entry and entry.id and tostring(entry.id) or ""
     end
+    local selected_key = table.concat(selected_key_parts, ",")
+    local presence_refresh_interval = tonumber((script._autofarm_cfg and script._autofarm_cfg.PRESENCE_REFRESH_INTERVAL) or 0.28) or 0.28
+    local refresh_presence = stagger.selected_key ~= selected_key or (now_time - (tonumber(stagger.presence_t or -9999) or -9999)) >= presence_refresh_interval
+    if refresh_presence then
+        local observed = script.get_cached_autofarm_camp_presence(selected, now_time)
+        local observed_by_id = {}
+        for i = 1, #observed do
+            local entry = observed[i]
+            if entry and entry.camp and entry.camp.id then
+                observed_by_id[entry.camp.id] = entry
+            end
+        end
+        stagger.presence_t = now_time
+        stagger.selected_key = selected_key
+        stagger.observed_by_id = observed_by_id
+    end
+    local observed_by_id = stagger.observed_by_id or {}
     local camps = {}
     local camp_by_id = {}
     local next_spawn_time = get_next_neutral_spawn_time(now_time)
@@ -10427,31 +10544,52 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
     local wave_defense_targets = {}
     local wave_taken = {}
     if wave_split_enabled then
-        local markers = select(1, script.get_cached_autofarm_wave_markers(local_hero, now_time))
-        wave_markers = markers or {}
-        for i = 1, #wave_markers do
-            local marker = wave_markers[i]
-            if marker and marker.threatens_ally_tower == true and (tonumber(marker.count or 0) or 0) >= script._autofarm_cfg.WAVE_DEFENSE_MIN_CREEPS then
-                wave_defense_targets[#wave_defense_targets + 1] = marker
+        local wave_refresh_interval = tonumber((script._autofarm_cfg and script._autofarm_cfg.WAVE_REFRESH_INTERVAL) or 0.24) or 0.24
+        local refresh_wave = (stagger.wave_split ~= true) or ((now_time - (tonumber(stagger.wave_t or -9999) or -9999)) >= wave_refresh_interval)
+        if refresh_wave then
+            local markers = select(1, script.get_cached_autofarm_wave_markers(local_hero, now_time))
+            local defense = {}
+            local mk = markers or {}
+            for i = 1, #mk do
+                local marker = mk[i]
+                if marker and marker.threatens_ally_tower == true and (tonumber(marker.count or 0) or 0) >= script._autofarm_cfg.WAVE_DEFENSE_MIN_CREEPS then
+                    defense[#defense + 1] = marker
+                end
             end
+            stagger.wave_t = now_time
+            stagger.wave_split = true
+            stagger.wave_markers = mk
+            stagger.wave_defense_targets = defense
         end
+        wave_markers = stagger.wave_markers or {}
+        wave_defense_targets = stagger.wave_defense_targets or {}
     else
         script.autofarm_reset_wave_owner()
         wave_markers = {}
+        stagger.wave_split = false
+        stagger.wave_markers = {}
+        stagger.wave_defense_targets = {}
     end
 
     local path_cost_cache = {}
     local path_block_events_tick = 0
-    local function get_path_cost(from_pos, to_pos)
-        local cost, blocked, is_new = script.autofarm_estimate_path_cost(from_pos, to_pos, path_cost_cache)
-        if is_new and blocked > 0 then
-            path_block_events_tick = path_block_events_tick + 1
+    local path_budget_per_tick = tonumber((script._autofarm_cfg and script._autofarm_cfg.PATH_BUDGET_PER_TICK) or 28) or 28
+    local path_budget_used = 0
+    function get_path_cost(from_pos, to_pos)
+        if path_budget_used < path_budget_per_tick then
+            path_budget_used = path_budget_used + 1
+            local cost, blocked, is_new = script.autofarm_estimate_path_cost(from_pos, to_pos, path_cost_cache)
+            if is_new and blocked > 0 then
+                path_block_events_tick = path_block_events_tick + 1
+            end
+            return tonumber(cost or 999999) or 999999
         end
-        return tonumber(cost or 999999) or 999999
+        script.autofarm_metric_inc("path_budget_fallback", 1)
+        return tonumber(vec_dist_2d(from_pos, to_pos) or 999999) or 999999
     end
     local camp_queue = script._autofarm_camp_queue_by_meepo or {}
     script._autofarm_camp_queue_by_meepo = camp_queue
-    local function get_queue_entry(meepo_key)
+    function get_queue_entry(meepo_key)
         if not meepo_key then
             return nil
         end
@@ -10468,7 +10606,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return q
     end
-    local function queue_clear_if_matches(meepo_key, camp_id)
+    function queue_clear_if_matches(meepo_key, camp_id)
         if not meepo_key or not camp_id then
             return
         end
@@ -10485,7 +10623,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
             q.updated_at = now_time
         end
     end
-    local function queue_primary_candidate(meepo_key)
+    function queue_primary_candidate(meepo_key)
         local q = get_queue_entry(meepo_key)
         local camp_id = q and q.primary_id or nil
         local camp = camp_id and camp_by_id[camp_id] or nil
@@ -10503,7 +10641,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return camp
     end
-    local function set_queue_plan(meepo_key, primary_id, secondary_id)
+    function set_queue_plan(meepo_key, primary_id, secondary_id)
         if not meepo_key then
             return
         end
@@ -10617,7 +10755,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         return (tonumber(a and a.key or 0) or 0) < (tonumber(b and b.key or 0) or 0)
     end)
 
-    local function choose_camp(meepo_pos, meepo_key, opts)
+    function choose_camp(meepo_pos, meepo_key, opts)
         opts = opts or {}
         local exclude_ids = opts.exclude_ids or nil
         local explicit_origin = opts.origin or nil
@@ -10785,7 +10923,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return fallback
     end
-    local function choose_wait_camp(meepo_pos, meepo_key, opts)
+    function choose_wait_camp(meepo_pos, meepo_key, opts)
         opts = opts or {}
         local exclude_ids = opts.exclude_ids or nil
         local respawn_fuzz = tonumber(script._autofarm_cfg.RESPAWN_PLAN_FUZZ or 1.35) or 1.35
@@ -10818,7 +10956,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return best
     end
-    local function handle_autostack_for_camp(meepo, key, meepo_pos, assigned, creeps)
+    function handle_autostack_for_camp(meepo, key, meepo_pos, assigned, creeps)
         if auto_stack_enabled ~= true then
             return false, false
         end
@@ -10895,7 +11033,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         return true, issued_stack
     end
 
-    local function try_autofarm_poof_move(meepo, meepo_key, meepo_pos, assigned)
+    function try_autofarm_poof_move(meepo, meepo_key, meepo_pos, assigned)
         if use_poof_move ~= true then
             return false
         end
@@ -10963,7 +11101,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return false
     end
-    local function get_alive_wave_creeps(creeps)
+    function get_alive_wave_creeps(creeps)
         local out = {}
         if not creeps then
             return out
@@ -10976,7 +11114,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return out
     end
-    local function choose_wave_target_for_meepo(meepo_pos, meepo_key)
+    function choose_wave_target_for_meepo(meepo_pos, meepo_key)
         if not script.autofarm_can_assign_wave_to(meepo_key, now_time) then
             return nil, nil
         end
@@ -11007,7 +11145,7 @@ function script.run_autofarm_logic(local_player, local_hero, meepos, now)
         end
         return best, best_creeps
     end
-    local function handle_wave_defense_for_meepo(meepo, meepo_key, meepo_pos, wave_target, alive_creeps)
+    function handle_wave_defense_for_meepo(meepo, meepo_key, meepo_pos, wave_target, alive_creeps)
         if not meepo or not meepo_key or not meepo_pos or not wave_target or not wave_target.center then
             return false, false
         end
@@ -11620,7 +11758,7 @@ end
 
 
 function script.draw_autofarm_map_panel(local_hero, meepos, now)
-    if not ui.autofarm_show_map or not ui.autofarm_show_map.Get or ui.autofarm_show_map:Get() ~= true then
+    if script._autofarm_map_visible ~= true then
         return
     end
     if not Render or not Render.Text or not Render.FilledRect or not Render.TextSize then
@@ -11927,30 +12065,18 @@ function script.draw_autofarm_map_panel(local_hero, meepos, now)
     end
     -- ally/enemy hero icons on map (excluding meepo units, already drawn above)
     do
-        local heroes = (Heroes and Heroes.GetAll and safe_call(Heroes.GetAll)) or {}
-        if local_team == nil then
-            local_team = tonumber(safe_call(Entity.GetTeamNum, local_hero) or -1) or -1
-        end
+        local hero_entries
+        hero_entries, local_team = script.get_cached_autofarm_map_heroes(local_hero, now)
         local hero_icon_size = math.max(9, math.floor(12 * scale))
         local hero_icon_half = hero_icon_size * 0.5
-        for i = 1, #heroes do
-            local hero = heroes[i]
-            if hero and Entity.IsAlive(hero) and not is_meepo_instance(hero) and safe_call(NPC.IsIllusion, hero) ~= true then
-                local pos = safe_call(Entity.GetAbsOrigin, hero)
-                local nx, ny = script.autofarm_world_to_norm(pos)
-                if nx and ny then
-                    local sx, sy = autofarm_map_to_screen(nx, ny, map_x, map_y, map_size_i)
-                    local team = tonumber(safe_call(Entity.GetTeamNum, hero) or -1) or -1
-                    local is_ally = (local_team < 0) or (team == local_team)
-                    local tint = is_ally and Color(115, 220, 255, 245) or Color(255, 118, 118, 245)
-                    local unit_name = safe_call(NPC.GetUnitName, hero)
-                    local icon_path = unit_name and ("panorama/images/heroes/icons/" .. tostring(unit_name) .. "_png.vtex_c") or nil
-                    local hero_icon = icon_path and autofarm_get_image_handle(icon_path) or nil
-                    if hero_icon and Render.Image then
-                        Render.Image(hero_icon, Vec2(sx - hero_icon_half, sy - hero_icon_half), Vec2(hero_icon_size, hero_icon_size), tint, 2)
-                    elseif Render.Circle then
-                        Render.Circle(Vec2(sx, sy), math.max(3, hero_icon_half - 2), tint, 2.2)
-                    end
+        for i = 1, #hero_entries do
+            local entry = hero_entries[i]
+            if entry and entry.nx and entry.ny then
+                local sx, sy = autofarm_map_to_screen(entry.nx, entry.ny, map_x, map_y, map_size_i)
+                if entry.icon and Render.Image then
+                    Render.Image(entry.icon, Vec2(sx - hero_icon_half, sy - hero_icon_half), Vec2(hero_icon_size, hero_icon_size), entry.tint or Color(255, 255, 255, 245), 2)
+                elseif Render.Circle then
+                    Render.Circle(Vec2(sx, sy), math.max(3, hero_icon_half - 2), entry.tint or Color(255, 255, 255, 245), 2.2)
                 end
             end
         end
@@ -12366,6 +12492,7 @@ function script.OnFrame()
     local meepos = collect_meepos()
     local local_player = safe_call(Players.GetLocal)
     script.update_autofarm_runtime_toggle(now)
+    script.update_autofarm_map_toggle(now)
     script.run_autofarm_logic(local_player, local_hero, meepos, now)
     begin_item_frame_budget()
     if local_player then
